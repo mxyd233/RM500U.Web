@@ -35,7 +35,7 @@ dotnet publish RM500U.Web.csproj -c Release -r win-x64 --self-contained true -o 
 
 运行 `publish/win-x64/RM500U.Web.exe`，浏览器访问 `http://127.0.0.1:5080`。
 
-Windows 上程序自动识别设备管理器中的 Quectel AT 串口（如 `Quectel USB AT Port (COM13)`），无需手动配置端口。ECM / NCM / RNDIS 使用系统 DHCP；MBIM 拨号仅在 Linux 上可用，Windows 请选择其他 USB 模式。
+程序自动识别 AT 串口，无需手动配置端口。已实测 ECM、MBIM 模式可在 Windows 使用；Linux 下 ECM 模式实测可用。
 
 ### 无硬件时体验
 
