@@ -1,0 +1,10 @@
+bin/
+obj/
+data/*
+!data/.gitkeep
+publish/
+*.user
+*.suo
+.claude/
+*.log
+*.tmp

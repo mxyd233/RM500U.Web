@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.IO.Ports" Version="10.0.5" />
+  </ItemGroup>
+
+  <!-- Runtime data belongs under RM500U_DATA_DIR and must never be shipped. -->
+  <ItemGroup>
+    <Content Remove="data*/**" />
+    <None Remove="data*/**" />
+    <Content Remove="webhook-capture*" />
+    <None Remove="webhook-capture*" />
+    <Content Remove="publish*/**" />
+    <None Remove="publish*/**" />
+  </ItemGroup>
+
+</Project>

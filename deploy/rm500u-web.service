@@ -1,0 +1,46 @@
+[Unit]
+Description=RM500U Web Modem Console
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/rm500u-web
+
+Environment=ASPNETCORE_ENVIRONMENT=Production
+Environment=ASPNETCORE_URLS=http://0.0.0.0:5080
+Environment=RM500U_DATA_DIR=/var/lib/rm500u-web
+Environment=RM500U_SIMULATE=false
+Environment=DOTNET_NOLOGO=true
+Environment=DOTNET_CLI_TELEMETRY_OPTOUT=true
+EnvironmentFile=-/etc/rm500u-web.env
+
+ExecStart=/opt/rm500u-web/rm500u-web-launcher
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGINT
+SyslogIdentifier=rm500u-web
+
+StateDirectory=rm500u-web
+StateDirectoryMode=0700
+UMask=0077
+
+# The service intentionally keeps real device and network access. It talks to
+# /dev/ttyUSB* or /dev/ttyACM* and may run ip, nmcli, udhcpc, dhclient, or
+# networkctl.
+PrivateDevices=false
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,114 @@
+/* Signal and band controls keep their visual state independent of browser defaults. */
+.signal-gauge-value {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 2px;
+  line-height: 1;
+}
+
+.signal-gauge .signal-gauge-value strong {
+  position: static;
+  line-height: 1;
+}
+
+.signal-gauge .signal-gauge-value small {
+  position: static;
+  margin: 0;
+  color: #8ea9a8;
+  font: 700 8px/1 "Cascadia Mono", monospace;
+}
+
+.band-options label {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  color: #56686d;
+  font: 10px "Cascadia Mono", monospace;
+  cursor: pointer;
+}
+
+.band-options label span {
+  position: relative;
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  padding: 0 8px 0 27px;
+  line-height: 1;
+  background: #f4f8f7;
+  border: 1px solid #dce7e5;
+  border-radius: 4px;
+  transition: color .16s ease, background .16s ease, border-color .16s ease, box-shadow .16s ease;
+}
+
+.band-options label span::before {
+  position: absolute;
+  top: 50%;
+  left: 8px;
+  width: 14px;
+  height: 14px;
+  box-sizing: border-box;
+  background: #fff;
+  border: 1px solid #9eb3b4;
+  border-radius: 3px;
+  content: "";
+  transform: translateY(-50%);
+}
+
+.band-options label span::after {
+  position: absolute;
+  top: 50%;
+  left: 12px;
+  width: 4px;
+  height: 7px;
+  border-right: 2px solid #fff;
+  border-bottom: 2px solid #fff;
+  content: "";
+  opacity: 0;
+  transform: translateY(-60%) rotate(45deg);
+  transition: opacity .12s ease;
+}
+
+.band-options label input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.band-options label input:checked + span {
+  color: #125b4b;
+  background: var(--green-soft);
+  border-color: #a6d9c7;
+}
+
+.band-options label input:checked + span::before {
+  background: var(--green);
+  border-color: var(--green);
+}
+
+.band-options label input:checked + span::after {
+  opacity: 1;
+}
+
+.band-options label:hover span {
+  border-color: #9ccbd5;
+}
+
+.band-options label:focus-within span {
+  border-color: var(--cyan);
+  box-shadow: 0 0 0 3px rgba(26, 138, 164, .12);
+}
+
+@media (max-width: 600px) {
+  .signal-gauge .signal-gauge-value strong {
+    font-size: 18px;
+  }
+
+  .signal-gauge .signal-gauge-value small {
+    font-size: 7px;
+  }
+}
