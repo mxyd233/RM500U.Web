@@ -29,12 +29,223 @@ const pageMeta = {
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
+let customSelectSequence = 0;
+const customSelectInstances = new WeakMap();
+let customSelectDocumentEventsBound = false;
+
+function initCustomSelects(root = document) {
+  $$('select:not(.custom-select-native)', root).forEach(enhanceCustomSelect);
+  if (customSelectDocumentEventsBound) return;
+  customSelectDocumentEventsBound = true;
+  document.addEventListener("click", event => {
+    if (event.target instanceof Element && event.target.closest(".custom-select")) return;
+    closeAllCustomSelects();
+  });
+  document.addEventListener("focusin", event => {
+    if (event.target instanceof Element && event.target.closest(".custom-select")) return;
+    closeAllCustomSelects();
+  });
+}
+
+function enhanceCustomSelect(select) {
+  if (!(select instanceof HTMLSelectElement) || customSelectInstances.has(select)) return;
+  const wrapper = document.createElement("div");
+  wrapper.className = "custom-select";
+  const trigger = document.createElement("button");
+  trigger.type = "button";
+  trigger.className = "custom-select-trigger";
+  trigger.setAttribute("aria-haspopup", "listbox");
+  trigger.setAttribute("aria-expanded", "false");
+  const label = document.createElement("span");
+  label.className = "custom-select-value";
+  const chevron = document.createElement("span");
+  chevron.className = "custom-select-chevron";
+  chevron.setAttribute("aria-hidden", "true");
+  trigger.append(label, chevron);
+
+  const menu = document.createElement("div");
+  menu.className = "custom-select-menu";
+  menu.id = `custom-select-menu-${++customSelectSequence}`;
+  menu.setAttribute("role", "listbox");
+  menu.hidden = true;
+  trigger.setAttribute("aria-controls", menu.id);
+
+  const instance = { wrapper, trigger, label, menu, activeIndex: -1 };
+  customSelectInstances.set(select, instance);
+  select.classList.add("custom-select-native");
+  select.setAttribute("aria-hidden", "true");
+  select.tabIndex = -1;
+  select.parentNode.insertBefore(wrapper, select);
+  wrapper.append(select, trigger, menu);
+
+  trigger.addEventListener("click", () => {
+    if (wrapper.classList.contains("is-open")) closeCustomSelect(select, true);
+    else openCustomSelect(select);
+  });
+  trigger.addEventListener("keydown", event => handleCustomSelectKeydown(select, event));
+  menu.addEventListener("click", event => {
+    const option = event.target instanceof Element ? event.target.closest("[data-custom-option-index]") : null;
+    if (!option || option.disabled) return;
+    chooseCustomSelect(select, Number(option.dataset.customOptionIndex));
+  });
+  select.addEventListener("input", () => syncCustomSelect(select));
+  select.addEventListener("change", () => syncCustomSelect(select));
+  const observer = new MutationObserver(() => syncCustomSelect(select));
+  observer.observe(select, { childList: true, subtree: true, attributes: true, attributeFilter: ["disabled", "label", "value"] });
+  instance.observer = observer;
+  syncCustomSelect(select);
+}
+
+function syncCustomSelect(select) {
+  const instance = customSelectInstances.get(select);
+  if (!instance) return;
+  const options = [...select.options];
+  const selectedIndex = select.selectedIndex;
+  const selected = options[selectedIndex];
+  instance.label.textContent = selected?.textContent?.trim() || "请选择";
+  instance.trigger.disabled = select.disabled || options.length === 0;
+  instance.trigger.setAttribute("aria-disabled", String(instance.trigger.disabled));
+  instance.menu.replaceChildren();
+  options.forEach((option, index) => {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "custom-select-option";
+    item.id = `${instance.menu.id}-option-${index}`;
+    item.dataset.customOptionIndex = String(index);
+    item.setAttribute("role", "option");
+    item.setAttribute("aria-selected", String(index === selectedIndex));
+    item.disabled = option.disabled;
+    item.textContent = option.textContent?.trim() || " ";
+    instance.menu.append(item);
+  });
+  instance.activeIndex = selectedIndex >= 0 ? selectedIndex : findSelectableIndex(options, 0, 1);
+  if (instance.wrapper.classList.contains("is-open")) {
+    instance.menu.hidden = false;
+    highlightCustomSelect(select, instance.activeIndex);
+  }
+}
+
+function findSelectableIndex(options, start, step) {
+  if (!options.length) return -1;
+  let index = start;
+  for (let count = 0; count < options.length; count += 1) {
+    if (index < 0) index = options.length - 1;
+    if (index >= options.length) index = 0;
+    if (!options[index].disabled) return index;
+    index += step;
+  }
+  return -1;
+}
+
+function openCustomSelect(select) {
+  const instance = customSelectInstances.get(select);
+  if (!instance || instance.trigger.disabled) return;
+  closeAllCustomSelects(select);
+  instance.wrapper.classList.add("is-open");
+  instance.menu.hidden = false;
+  instance.activeIndex = select.selectedIndex >= 0 ? select.selectedIndex : findSelectableIndex([...select.options], 0, 1);
+  instance.trigger.setAttribute("aria-expanded", "true");
+  highlightCustomSelect(select, instance.activeIndex);
+}
+
+function closeCustomSelect(select, restoreFocus = false) {
+  const instance = customSelectInstances.get(select);
+  if (!instance || !instance.wrapper.classList.contains("is-open")) return;
+  instance.wrapper.classList.remove("is-open");
+  instance.menu.hidden = true;
+  instance.trigger.setAttribute("aria-expanded", "false");
+  instance.trigger.removeAttribute("aria-activedescendant");
+  if (restoreFocus) instance.trigger.focus();
+}
+
+function closeAllCustomSelects(exceptSelect = null) {
+  $$(".custom-select.is-open").forEach(wrapper => {
+    const select = $("select.custom-select-native", wrapper);
+    if (select && select !== exceptSelect) closeCustomSelect(select);
+  });
+}
+
+function highlightCustomSelect(select, index) {
+  const instance = customSelectInstances.get(select);
+  if (!instance) return;
+  const options = [...select.options];
+  if (index < 0 || index >= options.length || options[index].disabled) return;
+  instance.activeIndex = index;
+  $$(".custom-select-option", instance.menu).forEach((item, itemIndex) => item.classList.toggle("is-highlighted", itemIndex === index));
+  const active = instance.menu.children[index];
+  if (active) {
+    instance.trigger.setAttribute("aria-activedescendant", active.id);
+    active.scrollIntoView({ block: "nearest" });
+  }
+}
+
+function moveCustomSelectHighlight(select, step) {
+  const instance = customSelectInstances.get(select);
+  if (!instance) return;
+  const next = findSelectableIndex([...select.options], instance.activeIndex + step, step);
+  if (next >= 0) highlightCustomSelect(select, next);
+}
+
+function chooseCustomSelect(select, index) {
+  const option = select.options[index];
+  if (!option || option.disabled) return;
+  const changed = select.selectedIndex !== index;
+  select.selectedIndex = index;
+  syncCustomSelect(select);
+  closeCustomSelect(select, true);
+  if (changed) {
+    select.dispatchEvent(new Event("input", { bubbles: true }));
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+}
+
+function handleCustomSelectKeydown(select, event) {
+  const instance = customSelectInstances.get(select);
+  if (!instance || instance.trigger.disabled) return;
+  const isOpen = instance.wrapper.classList.contains("is-open");
+  if (event.key === "Tab") {
+    closeCustomSelect(select);
+    return;
+  }
+  if (event.key === "Escape") {
+    if (isOpen) {
+      event.preventDefault();
+      closeCustomSelect(select, true);
+    }
+    return;
+  }
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    const step = event.key === "ArrowDown" ? 1 : -1;
+    if (!isOpen) openCustomSelect(select);
+    moveCustomSelectHighlight(select, step);
+    return;
+  }
+  if (event.key === "Home" || event.key === "End") {
+    event.preventDefault();
+    if (!isOpen) openCustomSelect(select);
+    const options = [...select.options];
+    const start = event.key === "Home" ? 0 : options.length - 1;
+    const step = event.key === "Home" ? 1 : -1;
+    const next = findSelectableIndex(options, start, step);
+    if (next >= 0) highlightCustomSelect(select, next);
+    return;
+  }
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    if (!isOpen) openCustomSelect(select);
+    else chooseCustomSelect(select, instance.activeIndex);
+  }
+}
+
 document.addEventListener("DOMContentLoaded", init);
 
 async function init() {
   bindNavigation();
   bindForms();
   bindActions();
+  initCustomSelects();
+  initTheme();
   const initialPage = location.hash.slice(1);
   navigate(pageMeta[initialPage] ? initialPage : "dashboard", false);
   const results = await Promise.allSettled([loadConfig(), loadCandidates(), refreshStatus(true, true)]);
@@ -142,6 +353,40 @@ function bindActions() {
   }));
 }
 
+const THEME_KEY = "rm500u-theme";
+const THEME_ICONS = { system: "i-monitor", light: "i-sun", dark: "i-moon" };
+const THEME_LABELS = { system: "主题：跟随系统", light: "主题：浅色", dark: "主题：深色" };
+const THEME_ORDER = ["system", "light", "dark"];
+
+function themePreference() {
+  let pref;
+  try { pref = localStorage.getItem(THEME_KEY) || "system"; } catch (e) { pref = "system"; }
+  return THEME_ICONS[pref] ? pref : "system";
+}
+function renderThemeToggle(pref) {
+  const button = $("#themeToggle");
+  if (!button) return;
+  const use = button.querySelector("use");
+  if (use) use.setAttribute("href", `#${THEME_ICONS[pref] || "i-monitor"}`);
+  button.title = THEME_LABELS[pref];
+  button.setAttribute("aria-label", THEME_LABELS[pref]);
+}
+function cycleTheme() {
+  const current = themePreference();
+  applyThemePreference(THEME_ORDER[(THEME_ORDER.indexOf(current) + 1) % THEME_ORDER.length]);
+}
+function applyThemePreference(pref) {
+  if (window.__rm500uSetTheme) window.__rm500uSetTheme(pref);
+  renderThemeToggle(pref);
+}
+function initTheme() {
+  $("#themeToggle")?.addEventListener("click", cycleTheme);
+  renderThemeToggle(themePreference());
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+    if (themePreference() === "system") applyThemePreference("system");
+  });
+}
+
 function startPolling() {
   clearInterval(state.pollTimer);
   state.pollTimer = setInterval(() => {
@@ -198,9 +443,24 @@ function renderStatus(status) {
   setText("heroInterface", connection.interfaceName);
   setText("heroRxRate", formatRate(connection.rxBytesPerSecond));
   setText("heroTxRate", formatRate(connection.txBytesPerSecond));
+  setText("heroTrafficTotal", `${formatBytes(connection.rxBytes)} / ${formatBytes(connection.txBytes)}`);
+  setText("heroRsrp", formatNumber(signal.rsrp ?? primary.rsrp, " dBm", 0));
+  setText("heroRsrq", formatNumber(signal.rsrq ?? primary.rsrq, " dB", 0));
+  setText("heroSinr", formatNumber(signal.sinr ?? primary.sinr, " dB", 0));
   $(".signal-gauge").style.setProperty("--signal", percent + "%");
   setText("signalPercent", ready ? Math.round(percent) : "--");
   setText("signalGrade", signalGrade(percent));
+  const assessment = assessSignal(percent, signal);
+  const signalSummary = $("#signalSummary");
+  if (signalSummary) signalSummary.className = `signal-summary ${assessment.tone}`;
+  setText("signalAssessment", assessment.label);
+  setText("signalAssessmentText", assessment.description);
+  const qualityScore = signalQualityScore({
+    rsrp: signal.rsrp ?? primary.rsrp,
+    rsrq: signal.rsrq ?? primary.rsrq,
+    sinr: signal.sinr ?? primary.sinr
+  }, percent);
+  setText("signalScore", ready && qualityScore != null ? qualityScore : "--");
   $("#connectButton").disabled = !ready || connected;
   $("#disconnectButton").disabled = !ready || !connected;
   setText("deviceModel", device.model); setText("deviceVariant", device.variant); setText("deviceFirmware", device.firmware);
@@ -247,6 +507,18 @@ function renderMetric(name, raw, minimum, maximum, fair, poor, unit) {
   track.className = parsed == null ? "" : parsed <= poor ? "poor" : parsed <= fair ? "fair" : "";
 }
 
+function signalQualityScore(signal, fallback) {
+  const metrics = [
+    { value: signal.rsrp, minimum: -120, maximum: -70, weight: 0.35 },
+    { value: signal.rsrq, minimum: -20, maximum: -3, weight: 0.25 },
+    { value: signal.sinr, minimum: 0, maximum: 20, weight: 0.4 }
+  ].map(metric => ({ ...metric, value: nullableNumber(metric.value) })).filter(metric => metric.value != null);
+  if (!metrics.length) return fallback > 0 ? Math.round(fallback) : null;
+  const weight = metrics.reduce((sum, metric) => sum + metric.weight, 0);
+  const score = metrics.reduce((sum, metric) => sum + clamp((metric.value - metric.minimum) / (metric.maximum - metric.minimum) * 100, 0, 100) * metric.weight, 0) / weight;
+  return Math.round(score);
+}
+
 function renderStatusUnavailable(error) {
   setStatusLight($("#sideStatusLight"), "offline"); setStatusLight($("#heroStatusLight"), "offline");
   setText("sideDeviceState", "服务不可用"); setText("heroLinkLabel", "无法读取设备状态"); $("#deviceAlert").classList.remove("is-hidden");
@@ -263,6 +535,7 @@ function applyPreferenceChecks(preference) {
 function applyDeviceControls(device) {
   const usb = String(device.usbMode || "").toLowerCase(); if (["ecm", "mbim", "rndis", "ncm"].includes(usb)) $("#usbModeSelect").value = usb;
   const nat = String(device.natMode || "").toLowerCase(); if (["nic", "router", "bridge"].includes(nat)) $("#natModeSelect").value = nat;
+  syncCustomSelect($("#usbModeSelect")); syncCustomSelect($("#natModeSelect"));
   $$('[data-slot]').forEach(button => button.classList.toggle("is-active", Number(button.dataset.slot) === Number(device.simSlot)));
 }
 
@@ -270,6 +543,7 @@ async function loadConfig() {
   state.config = await api("/api/config");
   const form = $("#configForm"); if (!form) return;
   ["variant", "atPort", "baudRate", "interfaceName", "dhcpClient"].forEach(name => { if (form.elements[name]) form.elements[name].value = state.config[name] ?? ""; });
+  ["variant", "baudRate", "dhcpClient"].forEach(name => syncCustomSelect(form.elements[name]));
   form.elements.autoConnect.checked = Boolean(state.config.autoConnect); form.elements.manageInterface.checked = Boolean(state.config.manageInterface);
 }
 
@@ -300,8 +574,10 @@ function renderApn() {
   if (!state.apn) return;
   const select = $("#apnProfileSelect"); select.replaceChildren();
   (state.apn.profiles || []).forEach(profile => { const option = document.createElement("option"); option.value = profile.id; option.textContent = `${profile.name} (${profile.id})`; option.selected = profile.id === state.apn.activeProfileId; select.append(option); });
+  syncCustomSelect(select);
   const profile = activeApn(); if (!profile) return;
   const form = $("#apnForm"); ["name", "id", "apn", "pdpContext", "pdpType", "authentication", "username", "password"].forEach(name => { if (form.elements[name]) form.elements[name].value = profile[name] ?? ""; });
+  ["pdpType", "authentication"].forEach(name => syncCustomSelect(form.elements[name]));
   setText("apnSavedState", "已保存"); const modem = state.apn.modemProfile; const same = modem && ["apn", "pdpType", "authentication", "username"].every(key => String(modem[key] ?? "") === String(profile[key] ?? ""));
   setText("apnDeviceState", same ? "设备当前生效" : "设备当前未应用");
   $("#apnDirtyState").hidden = snapshotApn(state.apn) === state.apnSavedSnapshot;
@@ -366,6 +642,18 @@ function formatRate(raw) { return `${formatBytes(raw)}/s`; }
 function formatKbps(raw) { const kbps = nullableNumber(raw); if (kbps == null) return "--"; if (kbps >= 1000) return `${formatPlain(kbps / 1000)} Mbps`; return `${formatPlain(kbps)} Kbps`; }
 function formatTime(raw) { const date = raw instanceof Date ? raw : new Date(raw); return Number.isNaN(date.getTime()) ? "--:--:--" : new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(date); }
 function formatDateTime(raw, seconds = false) { if (!raw) return "--"; const date = new Date(raw); return Number.isNaN(date.getTime()) ? value(raw) : new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", ...(seconds ? { second: "2-digit" } : {}), hour12: false }).format(date); }
+function assessSignal(percent, signal) {
+  const rsrp = nullableNumber(signal.rsrp);
+  const rsrq = nullableNumber(signal.rsrq);
+  const sinr = nullableNumber(signal.sinr);
+  if (rsrp == null && rsrq == null && sinr == null) return { label: "--", description: "等待射频数据", tone: "" };
+  if (sinr != null && sinr <= 0) return { label: "需要关注", description: "SINR 偏低，当前吞吐可能受干扰影响。", tone: "is-poor" };
+  if (rsrq != null && rsrq <= -15) return { label: "质量偏弱", description: "RSRQ 偏低，可能存在干扰或小区负载。", tone: "is-warning" };
+  if (rsrp != null && rsrp <= -110) return { label: "覆盖偏弱", description: "RSRP 偏低，建议检查天线位置和周边环境。", tone: "is-warning" };
+  if (sinr != null && sinr <= 5) return { label: "基本可用", description: "链路已建立，但 SINR 仍有优化空间。", tone: "is-warning" };
+  const grade = signalGrade(percent);
+  return { label: grade, description: grade === "优秀" ? "覆盖与无线质量处于良好范围。" : "链路可用，建议继续观察指标变化。", tone: percent >= 60 ? "is-good" : "is-warning" };
+}
 function signalGrade(percent) { return percent >= 80 ? "优秀" : percent >= 60 ? "良好" : percent >= 35 ? "一般" : percent > 0 ? "较弱" : "--"; }
 function translateSimStatus(status) { const normalized = String(status || "").toUpperCase(); if (normalized === "READY") return { label: "已就绪", className: "success" }; if (normalized.includes("PIN") || normalized.includes("PUK")) return { label: "需要解锁", className: "danger" }; if (normalized.includes("NOT") || normalized.includes("ABSENT")) return { label: "未插卡", className: "danger" }; return { label: value(status, "未知"), className: "neutral" }; }
 function bandName(rat, band) { return String(rat).toUpperCase().startsWith("NR") ? `n${band}` : `B${band}`; }
