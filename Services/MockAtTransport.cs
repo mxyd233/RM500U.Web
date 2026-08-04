@@ -98,6 +98,7 @@ public sealed class MockAtTransport(OperationLog log) : IAtTransport
                 "+C5GQOSRDP: 11,5,0,0,0,0,40000,40000,0");
         if (command.Equals("AT+C5GQOSRDP=1", StringComparison.OrdinalIgnoreCase)) return Ok(command, "+C5GQOSRDP: 1,9,256000,128000,512000,256000,1024000,512000,200");
         if (command.Equals("AT+CSQ", StringComparison.OrdinalIgnoreCase)) return Ok(command, "+CSQ: 24,99");
+        if (command.Equals("AT+QCSQ", StringComparison.OrdinalIgnoreCase)) return Ok(command, "+QCSQ: \"NR5G-NSA\",-63,-82,-10,24");
         if (command.Equals("AT+QTEMP", StringComparison.OrdinalIgnoreCase)) return Ok(command, "+QTEMP: 43");
         if (command.Equals("AT+CBC", StringComparison.OrdinalIgnoreCase)) return Ok(command, "+CBC: 0,88,3814");
         if (command.Equals("AT+CFUN?", StringComparison.OrdinalIgnoreCase)) return Ok(command, "+CFUN: 1");

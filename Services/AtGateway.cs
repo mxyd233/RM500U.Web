@@ -51,6 +51,17 @@ public sealed class AtGateway(
         return await Transport.ExecuteAsync(port, baudRate, command.Trim(), timeout ?? TimeSpan.FromSeconds(6), cancellationToken);
     }
 
+    public async Task<AtCommandResult> ExecuteOnPortAsync(
+        string port,
+        int baudRate,
+        string command,
+        TimeSpan? timeout = null,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateCommand(command);
+        return await Transport.ExecuteAsync(port, baudRate, command.Trim(), timeout ?? TimeSpan.FromSeconds(6), cancellationToken);
+    }
+
     public async Task<AtCommandResult> ExecuteInteractiveAsync(
         string command,
         string payload,

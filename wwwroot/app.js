@@ -8,6 +8,7 @@ const state = {
   apn: null,
   apnSavedSnapshot: "",
   sms: null,
+  smsLoadTask: null,
   selectedPeer: "",
   webhook: null,
   bands: null,
@@ -15,7 +16,9 @@ const state = {
   logs: [],
   statusLoading: false,
   pendingRequests: 0,
-  pollTimer: null
+  pollTimer: null,
+  smsPollTimer: null,
+  smsRefreshTimer: null
 };
 
 const pageMeta = {
@@ -340,7 +343,7 @@ function bindActions() {
       "save-config": saveConfig,
       "refresh-radio": () => settle([loadBands(), loadCells(), refreshStatus(true)]),
       "save-preference": saveNetworkPreference,
-      "refresh-sms": loadSms,
+      "refresh-sms": () => loadSms(true),
       "clear-logs": clearLogs
     };
     const action = actions[button.dataset.action];
@@ -389,18 +392,22 @@ function initTheme() {
 
 function startPolling() {
   clearInterval(state.pollTimer);
+  clearInterval(state.smsPollTimer);
   state.pollTimer = setInterval(() => {
     if (document.hidden) return;
     refreshStatus(false, false, true);
-    if (state.activePage === "sms") loadSms().catch(() => {});
   }, 8000);
+  state.smsPollTimer = setInterval(() => {
+    if (document.hidden || state.activePage !== "sms") return;
+    loadSms().catch(() => {});
+  }, 30000);
 }
 
 async function refreshActivePage() {
   if (state.activePage === "dashboard") return refreshStatus(true, true);
   if (state.activePage === "connection") return settle([loadConfig(), loadCandidates(), loadApn(), refreshStatus(true)]);
   if (state.activePage === "radio") return settle([loadBands(), loadCells(), refreshStatus(true)]);
-  if (state.activePage === "sms") return settle([loadSms(), loadWebhook()]);
+  if (state.activePage === "sms") return settle([loadSms(true), loadWebhook()]);
   if (state.activePage === "tools") return state.activeTool === "logs" ? loadLogs() : refreshStatus(true);
 }
 
@@ -427,7 +434,8 @@ function renderStatus(status) {
   const primary = cells.find(cell => String(cell.rat || "").includes("NR5G")) || cells[0] || {};
   const ready = Boolean(status.devicePresent);
   const connected = Boolean(connection.connected);
-  const percent = clamp(number(signal.percent), 0, 100);
+  const hasSignalData = [signal.rsrp, signal.rsrq, signal.sinr, signal.rssi].some(value => nullableNumber(value) != null);
+  const score = ready && hasSignalData ? Math.round(clamp(number(signal.percent), 0, 100)) : null;
   const simulation = status.simulation === true;
   $("#environmentBadge").hidden = !simulation;
   $("#deviceAlert").classList.toggle("is-hidden", ready && !status.error);
@@ -447,20 +455,15 @@ function renderStatus(status) {
   setText("heroRsrp", formatNumber(signal.rsrp ?? primary.rsrp, " dBm", 0));
   setText("heroRsrq", formatNumber(signal.rsrq ?? primary.rsrq, " dB", 0));
   setText("heroSinr", formatNumber(signal.sinr ?? primary.sinr, " dB", 0));
-  $(".signal-gauge").style.setProperty("--signal", percent + "%");
-  setText("signalPercent", ready ? Math.round(percent) : "--");
-  setText("signalGrade", signalGrade(percent));
-  const assessment = assessSignal(percent, signal);
+  $(".signal-gauge").style.setProperty("--signal", `${score ?? 0}%`);
+  setText("signalPercent", score);
+  setText("signalGrade", score == null ? "--" : signalGrade(score));
+  const assessment = assessSignal(score, signal);
   const signalSummary = $("#signalSummary");
   if (signalSummary) signalSummary.className = `signal-summary ${assessment.tone}`;
   setText("signalAssessment", assessment.label);
   setText("signalAssessmentText", assessment.description);
-  const qualityScore = signalQualityScore({
-    rsrp: signal.rsrp ?? primary.rsrp,
-    rsrq: signal.rsrq ?? primary.rsrq,
-    sinr: signal.sinr ?? primary.sinr
-  }, percent);
-  setText("signalScore", ready && qualityScore != null ? qualityScore : "--");
+  setText("signalScore", score);
   $("#connectButton").disabled = !ready || connected;
   $("#disconnectButton").disabled = !ready || !connected;
   setText("deviceModel", device.model); setText("deviceVariant", device.variant); setText("deviceFirmware", device.firmware);
@@ -505,18 +508,6 @@ function renderMetric(name, raw, minimum, maximum, fair, poor, unit) {
   output.textContent = parsed == null ? "--" : `${formatPlain(parsed)} ${unit}`;
   track.style.width = parsed == null ? "0%" : `${clamp((parsed - minimum) / (maximum - minimum) * 100, 0, 100)}%`;
   track.className = parsed == null ? "" : parsed <= poor ? "poor" : parsed <= fair ? "fair" : "";
-}
-
-function signalQualityScore(signal, fallback) {
-  const metrics = [
-    { value: signal.rsrp, minimum: -120, maximum: -70, weight: 0.35 },
-    { value: signal.rsrq, minimum: -20, maximum: -3, weight: 0.25 },
-    { value: signal.sinr, minimum: 0, maximum: 20, weight: 0.4 }
-  ].map(metric => ({ ...metric, value: nullableNumber(metric.value) })).filter(metric => metric.value != null);
-  if (!metrics.length) return fallback > 0 ? Math.round(fallback) : null;
-  const weight = metrics.reduce((sum, metric) => sum + metric.weight, 0);
-  const score = metrics.reduce((sum, metric) => sum + clamp((metric.value - metric.minimum) / (metric.maximum - metric.minimum) * 100, 0, 100) * metric.weight, 0) / weight;
-  return Math.round(score);
 }
 
 function renderStatusUnavailable(error) {
@@ -600,9 +591,30 @@ async function submitCellLock(event) { event.preventDefault(); const form = even
 async function handleUnlockAction(event) { const button = event.target.closest("[data-unlock-rat]"); if (!button) return; const result = await api("/api/cells/unlock", { method: "POST", body: { rat: button.dataset.unlockRat } }); notifyResult(result, "小区锁定已解除"); await loadCells(); }
 async function saveNetworkPreference() { const modes = $$('#networkModeSelector input:checked').map(input => input.value); if (!modes.length) return toast("未选择制式", "至少保留一个网络制式。", "warning"); const result = await api("/api/radio/preference", { method: "PUT", body: { modes } }); notifyResult(result, "网络偏好已更新"); await refreshStatus(true); }
 
-async function loadSms() { state.sms = await api("/api/sms"); renderSms(); }
-function renderSms() { const conversations = state.sms?.conversations || []; const unread = conversations.reduce((sum, conversation) => sum + Number(conversation.unreadCount || 0), 0); $("#smsNavCount").hidden = unread === 0; setText("smsNavCount", unread); setText("smsStorage", state.sms?.storage); setText("smsUsage", `${state.sms?.used ?? 0} / ${state.sms?.total ?? 0}`); const list = $("#conversationList"); if (!conversations.length) { list.innerHTML = '<div class="empty-state">SIM 卡中没有短信</div>'; $("#threadMessages").innerHTML = '<div class="empty-state">没有可显示的会话</div>'; return; } if (!conversations.some(conversation => conversation.peer === state.selectedPeer)) state.selectedPeer = conversations[0].peer; list.innerHTML = conversations.map(conversation => { const last = conversation.messages?.at(-1); return `<button type="button" class="conversation-item ${conversation.peer === state.selectedPeer ? "is-active" : ""}" data-peer="${escapeAttribute(conversation.peer)}"><strong>${escapeHtml(conversation.peer)}</strong><span>${escapeHtml(last?.content || "（空短信）")}</span><time>${escapeHtml(formatDateTime(conversation.lastTimestamp))}</time>${conversation.unreadCount ? `<b>${conversation.unreadCount}</b>` : ""}</button>`; }).join(""); const current = conversations.find(conversation => conversation.peer === state.selectedPeer); renderThread(current); }
-function renderThread(conversation) { setText("threadTitle", conversation?.peer || "选择一个号码"); const container = $("#threadMessages"); if (!conversation) { container.innerHTML = '<div class="empty-state">从左侧选择会话</div>'; return; } container.innerHTML = conversation.messages.map(message => `<article class="message-bubble ${String(message.direction).toLowerCase() === "outgoing" ? "outgoing" : "incoming"}"><div class="bubble-meta"><time>${escapeHtml(formatDateTime(message.timestamp, true))}</time><span>${message.segmentCount > 1 ? `${message.segmentCount} 段` : ""}</span><button type="button" data-sms-delete="${message.index}" title="删除消息" aria-label="删除消息"><svg><use href="#i-trash"/></svg></button></div><p>${escapeHtml(message.content || "（空短信）")}</p></article>`).join(""); $("#smsReplyForm").elements.recipient.value = conversation.peer; const unread = conversation.messages.filter(message => message.unread).flatMap(message => message.indices || [message.index]); if (unread.length) api("/api/sms/read", { method: "POST", body: { indices: unread } }).then(() => loadSms()).catch(() => {}); }
+async function loadSms(forceRefresh = false) {
+  if (state.smsLoadTask) return state.smsLoadTask;
+
+  const loadTask = api(`/api/sms${forceRefresh ? "?refresh=true" : ""}`).then(result => {
+    state.sms = result;
+    renderSms();
+    if (result?.isRefreshing) scheduleSmsRefresh();
+    else if (state.smsRefreshTimer) {
+      clearTimeout(state.smsRefreshTimer);
+      state.smsRefreshTimer = null;
+    }
+    return result;
+  });
+  state.smsLoadTask = loadTask;
+  try {
+    return await loadTask;
+  } finally {
+    if (state.smsLoadTask === loadTask) state.smsLoadTask = null;
+  }
+}
+function scheduleSmsRefresh() { clearTimeout(state.smsRefreshTimer); state.smsRefreshTimer = setTimeout(() => { state.smsRefreshTimer = null; if (!document.hidden && state.activePage === "sms") loadSms().catch(() => {}); }, 1200); }
+function renderSms() { const conversations = state.sms?.conversations || []; const unread = conversations.reduce((sum, conversation) => sum + Number(conversation.unreadCount || 0), 0); $("#smsNavCount").hidden = unread === 0; setText("smsNavCount", unread); setText("smsStorage", state.sms?.storage); setText("smsUsage", `${state.sms?.used ?? 0} / ${state.sms?.total ?? 0}`); const list = $("#conversationList"); if (!conversations.length) { list.innerHTML = `<div class="empty-state">${state.sms?.isRefreshing ? "正在读取短信..." : "SIM 卡中没有短信"}</div>`; $("#threadMessages").innerHTML = '<div class="empty-state">没有可显示的会话</div>'; return; } if (!conversations.some(conversation => conversation.peer === state.selectedPeer)) state.selectedPeer = conversations[0].peer; list.innerHTML = conversations.map(conversation => { const last = conversation.messages?.at(-1); return `<button type="button" class="conversation-item ${conversation.peer === state.selectedPeer ? "is-active" : ""}" data-peer="${escapeAttribute(conversation.peer)}"><strong>${escapeHtml(conversation.peer)}</strong><span>${escapeHtml(last?.content || "（空短信）")}</span><time>${escapeHtml(formatDateTime(conversation.lastTimestamp))}</time>${conversation.unreadCount ? `<b>${conversation.unreadCount}</b>` : ""}</button>`; }).join(""); const current = conversations.find(conversation => conversation.peer === state.selectedPeer); renderThread(current); }
+function renderThread(conversation) { setText("threadTitle", conversation?.peer || "选择一个号码"); const container = $("#threadMessages"); if (!conversation) { container.innerHTML = '<div class="empty-state">从左侧选择会话</div>'; return; } container.innerHTML = conversation.messages.map(message => `<article class="message-bubble ${String(message.direction).toLowerCase() === "outgoing" ? "outgoing" : "incoming"}"><div class="bubble-meta"><time>${escapeHtml(formatDateTime(message.timestamp, true))}</time><span>${message.segmentCount > 1 ? `${message.segmentCount} 段` : ""}</span><button type="button" data-sms-delete="${message.index}" title="删除消息" aria-label="删除消息"><svg><use href="#i-trash"/></svg></button></div><p>${escapeHtml(message.content || "（空短信）")}</p></article>`).join(""); $("#smsReplyForm").elements.recipient.value = conversation.peer; const unread = conversation.messages.filter(message => message.unread).flatMap(message => message.indices || [message.index]); if (unread.length) api("/api/sms/read", { method: "POST", body: { indices: unread } }).then(() => { markSmsReadLocally(unread); renderSms(); }).catch(() => {}); }
+function markSmsReadLocally(indices) { const readIndexes = new Set(indices.map(Number)); for (const conversation of state.sms?.conversations || []) { for (const message of conversation.messages || []) { const messageIndexes = message.indices || [message.index]; if (message.unread && messageIndexes.some(index => readIndexes.has(Number(index)))) message.unread = false; } conversation.unreadCount = (conversation.messages || []).filter(message => message.unread).length; } }
 function openConversation(peer) { state.selectedPeer = peer; renderSms(); }
 function newSms() { state.selectedPeer = ""; $("#smsForm input[name=recipient]").focus(); }
 async function sendSms(event) { event.preventDefault(); const form = event.currentTarget; const result = await api("/api/sms", { method: "POST", body: { recipient: form.elements.recipient.value.trim(), content: form.elements.content.value } }); notifyResult(result, "短信已发送"); if (result.success) { form.reset(); setText("smsCharCount", "0 / 500"); await loadSms(); } }

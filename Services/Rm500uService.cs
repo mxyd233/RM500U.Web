@@ -14,8 +14,34 @@ public sealed partial class Rm500uService(
 {
     private readonly SemaphoreSlim _statusGate = new(1, 1);
     private readonly SemaphoreSlim _smsGate = new(1, 1);
+    private readonly object _smsCacheGate = new();
+    private SmsListResult? _cachedSms;
+    private DateTimeOffset _smsCacheTime;
+    private Task<SmsListResult>? _smsLoadTask;
+    private readonly object _statusQueryCacheGate = new();
+    private readonly Dictionary<string, CachedStatusQuery> _statusQueryCache = new(StringComparer.OrdinalIgnoreCase);
     private ModemStatus? _cachedStatus;
     private DateTimeOffset _cacheTime;
+    private static readonly TimeSpan StatusCacheDuration = TimeSpan.FromSeconds(4);
+    private static readonly TimeSpan SmsCacheDuration = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan LowFrequencyStatusCacheDuration = TimeSpan.FromMinutes(1);
+
+    private static readonly HashSet<string> LowFrequencyStatusCommands = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "AT+CGMI",
+        "AT+CGMM",
+        "AT+CGMR",
+        "AT+CGSN",
+        "AT+CIMI",
+        "AT+ICCID",
+        "AT+CNUM",
+        "AT+QCFG=\"usbnet\"",
+        "AT+QCFG=\"nat\"",
+        "AT+QUIMSLOT?",
+        "AT+QNWPREFCFG=\"mode_pref\""
+    };
+
+    private sealed record CachedStatusQuery(AtCommandResult Result, DateTimeOffset CachedAt);
 
     private static readonly IReadOnlyDictionary<string, IReadOnlyDictionary<string, int[]>> BandProfiles =
         new Dictionary<string, IReadOnlyDictionary<string, int[]>>(StringComparer.OrdinalIgnoreCase)
@@ -43,17 +69,28 @@ public sealed partial class Rm500uService(
             }
         };
 
-    public void InvalidateCache() => _cachedStatus = null;
+    public void InvalidateCache()
+    {
+        _cachedStatus = null;
+        lock (_statusQueryCacheGate)
+            _statusQueryCache.Clear();
+    }
 
     public async Task<ModemStatus> GetStatusAsync(bool forceRefresh, CancellationToken cancellationToken = default)
     {
-        if (!forceRefresh && _cachedStatus is not null && DateTimeOffset.UtcNow - _cacheTime < TimeSpan.FromSeconds(4))
+        var requestStartedAt = DateTimeOffset.UtcNow;
+        if (!forceRefresh && _cachedStatus is not null && requestStartedAt - _cacheTime < StatusCacheDuration)
             return _cachedStatus;
 
         await _statusGate.WaitAsync(cancellationToken);
         try
         {
-            if (!forceRefresh && _cachedStatus is not null && DateTimeOffset.UtcNow - _cacheTime < TimeSpan.FromSeconds(4))
+            // A force-refresh request that waited behind another refresh can
+            // reuse the snapshot produced after it arrived instead of issuing
+            // a second full modem query immediately afterward.
+            if (_cachedStatus is not null &&
+                (_cacheTime > requestStartedAt ||
+                 (!forceRefresh && DateTimeOffset.UtcNow - _cacheTime < StatusCacheDuration)))
                 return _cachedStatus;
 
             var config = await configStore.LoadAsync(cancellationToken);
@@ -70,46 +107,52 @@ public sealed partial class Rm500uService(
                 return _cachedStatus;
             }
 
-            var cgmi = await Query("AT+CGMI", cancellationToken);
-            var cgmm = await Query("AT+CGMM", cancellationToken);
-            var cgmr = await Query("AT+CGMR", cancellationToken);
-            var cgsn = await Query("AT+CGSN", cancellationToken);
-            var cpin = await Query("AT+CPIN?", cancellationToken);
-            var cimi = await Query("AT+CIMI", cancellationToken);
-            var iccid = await Query("AT+ICCID", cancellationToken);
-            var cnum = await Query("AT+CNUM", cancellationToken);
-            var cops = await Query("AT+COPS?", cancellationToken);
-            var qnwinfo = await Query("AT+QNWINFO", cancellationToken);
-            var csq = await Query("AT+CSQ", cancellationToken);
-            var servingCell = await Query("AT+QENG=\"servingcell\"", cancellationToken, 8);
-            var qtemp = await Query("AT+QTEMP", cancellationToken);
-            var cbc = await Query("AT+CBC", cancellationToken);
-            var usbMode = await Query("AT+QCFG=\"usbnet\"", cancellationToken);
-            var natMode = await Query("AT+QCFG=\"nat\"", cancellationToken);
-            var simSlot = await Query("AT+QUIMSLOT?", cancellationToken);
-            var preference = await Query("AT+QNWPREFCFG=\"mode_pref\"", cancellationToken);
-            var cgact = await Query("AT+CGACT?", cancellationToken);
+            // Resolve the port once per status snapshot. Resolving every command
+            // repeats the Windows PnP scan and makes a 20-command snapshot slow.
+            Task<AtCommandResult> StatusQuery(string command, int timeoutSeconds = 6) =>
+                QueryOnPort(atPort, config.BaudRate, command, cancellationToken, timeoutSeconds);
+            var interfaceSnapshotTask = network.GetSnapshotAsync(cancellationToken);
+
+            var cgmi = await StatusQuery("AT+CGMI");
+            var cgmm = await StatusQuery("AT+CGMM");
+            var cgmr = await StatusQuery("AT+CGMR");
+            var cgsn = await StatusQuery("AT+CGSN");
+            var cpin = await StatusQuery("AT+CPIN?");
+            var cimi = await StatusQuery("AT+CIMI");
+            var iccid = await StatusQuery("AT+ICCID");
+            var cnum = await StatusQuery("AT+CNUM");
+            var cops = await StatusQuery("AT+COPS?");
+            var qnwinfo = await StatusQuery("AT+QNWINFO");
+            var csq = await StatusQuery("AT+CSQ");
+            var servingCell = await StatusQuery("AT+QENG=\"servingcell\"", 8);
+            var qtemp = await StatusQuery("AT+QTEMP");
+            var cbc = await StatusQuery("AT+CBC");
+            var usbMode = await StatusQuery("AT+QCFG=\"usbnet\"");
+            var natMode = await StatusQuery("AT+QCFG=\"nat\"");
+            var simSlot = await StatusQuery("AT+QUIMSLOT?");
+            var preference = await StatusQuery("AT+QNWPREFCFG=\"mode_pref\"");
+            var cgact = await StatusQuery("AT+CGACT?");
             // Query all PDP addresses. On RM500U firmware the configured CID
             // is often not the data CID (the modem may activate CID 2 while
             // the APN profile is stored in CID 1).
-            var cgpaddr = await Query("AT+CGPADDR", cancellationToken);
+            var cgpaddr = await StatusQuery("AT+CGPADDR");
             var activePdpContexts = AtParser.ParseActivePdpContexts(cgact.Raw);
             var pdpAddresses = AtParser.ParsePdpAddresses(cgpaddr.Raw);
             if (pdpAddresses.Count == 0)
             {
                 // Older firmware only accepts the explicit form.
-                var configuredAddress = await Query($"AT+CGPADDR={config.PdpContext}", cancellationToken);
+                var configuredAddress = await StatusQuery($"AT+CGPADDR={config.PdpContext}");
                 pdpAddresses = AtParser.ParsePdpAddresses(configuredAddress.Raw);
             }
 
             var preferredPdpContext = SelectPrimaryPdpContext(pdpAddresses, activePdpContexts, config.PdpContext);
             // The no-argument form returns all negotiated QoS flows and is
             // required when the active data CID differs from the APN CID.
-            var qos = await Query("AT+C5GQOSRDP", cancellationToken);
+            var qos = await StatusQuery("AT+C5GQOSRDP");
             if (!AtParser.HasQosRecord(qos.Raw))
             {
                 var fallbackCid = preferredPdpContext ?? config.PdpContext;
-                var targetedQos = await Query($"AT+C5GQOSRDP={fallbackCid}", cancellationToken);
+                var targetedQos = await StatusQuery($"AT+C5GQOSRDP={fallbackCid}");
                 if (AtParser.HasQosRecord(targetedQos.Raw) || !qos.Success)
                     qos = targetedQos;
             }
@@ -121,7 +164,7 @@ public sealed partial class Rm500uService(
                     "RM500U returned no dynamic QoS records",
                     $"command={qos.Command}; success={qos.Success}; raw={CompactAtResponse(qos.Raw)}");
             }
-            var interfaceSnapshot = await network.GetSnapshotAsync(cancellationToken);
+            var interfaceSnapshot = await interfaceSnapshotTask;
 
             var model = AtParser.FirstIdentity(cgmm.Raw, "AT+CGMM", "+CGMM", "RM500U");
             var manufacturer = AtParser.FirstIdentity(cgmi.Raw, "AT+CGMI", "+CGMI", "Quectel");
@@ -129,6 +172,18 @@ public sealed partial class Rm500uService(
             var imei = Digits15Regex().Match(cgsn.Raw).Value;
             var cells = AtParser.ParseServingCells(servingCell.Raw);
             var signal = BuildSignal(csq.Raw, cells);
+            if (signal.Sinr is null or <= 0)
+            {
+                // QENG can briefly report 0 while the serving-cell record is
+                // being updated. QCSQ is a modem-level fallback for that gap.
+                var qcsq = await StatusQuery("AT+QCSQ");
+                var qcsqSignal = ParseQcsq(qcsq.Raw);
+                if (qcsqSignal?.Sinr is > 0 && IsCompatibleSignalRat(qcsqSignal.Rat, cells))
+                {
+                    signal = MergeQcsqSignal(signal, qcsqSignal);
+                    log.Add("debug", "signal", "Used AT+QCSQ because serving-cell SINR was unavailable.", qcsq.Raw);
+                }
+            }
             var ipAddress = ParsePrimaryIpAddress(pdpAddresses, preferredPdpContext);
             if (string.IsNullOrEmpty(ipAddress))
                 ipAddress = ParseIpAddresses(cgpaddr.Raw);
@@ -402,31 +457,100 @@ public sealed partial class Rm500uService(
 
     public async Task<SmsListResult> ListSmsAsync(CancellationToken cancellationToken = default)
     {
-        await _smsGate.WaitAsync(cancellationToken);
+        Task<SmsListResult> loadTask;
+        lock (_smsCacheGate)
+        {
+            var now = DateTimeOffset.UtcNow;
+            if (_cachedSms is not null && now - _smsCacheTime < SmsCacheDuration)
+                return _cachedSms;
+
+            loadTask = EnsureSmsLoadLocked();
+        }
+
+        // The shared read continues long enough to populate the short cache
+        // even when the HTTP request that started it is cancelled.
+        return await loadTask.WaitAsync(cancellationToken);
+    }
+
+    public Task<SmsListResult> ListSmsSnapshotAsync(bool forceRefresh = false)
+    {
+        lock (_smsCacheGate)
+        {
+            var now = DateTimeOffset.UtcNow;
+            var refreshInProgress = _smsLoadTask is not null && !_smsLoadTask.IsCompleted;
+            if (!forceRefresh && !refreshInProgress && _cachedSms is not null && now - _smsCacheTime < SmsCacheDuration)
+                return Task.FromResult(_cachedSms);
+
+            // The HTTP endpoint should not make the browser wait for CMGL.
+            // Return the last snapshot immediately while the shared task
+            // refreshes it for the next request.
+            var refreshTask = EnsureSmsLoadLocked();
+            if (_cachedSms is not null)
+                return Task.FromResult(refreshTask.IsCompleted ? _cachedSms : _cachedSms with { IsRefreshing = true });
+
+            if (refreshTask.IsCompletedSuccessfully)
+                return Task.FromResult(refreshTask.Result);
+
+            return Task.FromResult(new SmsListResult([], "ME", 0, 0, true));
+        }
+    }
+
+    private Task<SmsListResult> EnsureSmsLoadLocked()
+    {
+        if (_smsLoadTask is null || _smsLoadTask.IsCompleted)
+        {
+            _smsLoadTask = LoadSmsCoreAsync();
+            _ = ObserveSmsLoadAsync(_smsLoadTask);
+        }
+
+        return _smsLoadTask;
+    }
+
+    private async Task ObserveSmsLoadAsync(Task<SmsListResult> loadTask)
+    {
         try
         {
-            var storageResult = await gateway.ExecuteAsync("AT+CPMS?", cancellationToken: cancellationToken);
-            var pduMode = await gateway.ExecuteAsync("AT+CMGF=0", cancellationToken: cancellationToken);
+            await loadTask.ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            log.Add("warning", "sms", "SMS background refresh failed.", exception.Message);
+        }
+    }
+
+    private async Task<SmsListResult> LoadSmsCoreAsync()
+    {
+        await _smsGate.WaitAsync(CancellationToken.None);
+        try
+        {
+            var storageResult = await gateway.ExecuteAsync("AT+CPMS?", cancellationToken: CancellationToken.None);
+            var pduMode = await gateway.ExecuteAsync("AT+CMGF=0", cancellationToken: CancellationToken.None);
             IReadOnlyList<DecodedSmsSegment> segments;
             if (pduMode.Success)
             {
-                var listResult = await gateway.ExecuteAsync("AT+CMGL=4", TimeSpan.FromSeconds(15), cancellationToken);
+                var listResult = await gateway.ExecuteAsync("AT+CMGL=4", TimeSpan.FromSeconds(15), CancellationToken.None);
                 segments = ParsePduSms(listResult.Raw);
                 if (segments.Count == 0 && !listResult.Success)
-                    segments = await ListTextSmsCore(cancellationToken);
+                    segments = await ListTextSmsCore(CancellationToken.None);
             }
             else
             {
-                segments = await ListTextSmsCore(cancellationToken);
+                segments = await ListTextSmsCore(CancellationToken.None);
             }
 
             var conversations = GroupSms(segments);
             var storage = AtParser.ParseCsv(AtParser.ValueAfterColon(storageResult.Raw, "+CPMS"));
-            return new SmsListResult(
+            var result = new SmsListResult(
                 conversations,
                 storage.ElementAtOrDefault(0) ?? "ME",
                 AtParser.Integer(storage.ElementAtOrDefault(1)) ?? segments.Count,
                 AtParser.Integer(storage.ElementAtOrDefault(2)) ?? 0);
+            lock (_smsCacheGate)
+            {
+                _cachedSms = result;
+                _smsCacheTime = DateTimeOffset.UtcNow;
+            }
+            return result;
         }
         finally
         {
@@ -464,6 +588,7 @@ public sealed partial class Rm500uService(
         }
         finally
         {
+            InvalidateSmsCache();
             _smsGate.Release();
         }
     }
@@ -493,6 +618,7 @@ public sealed partial class Rm500uService(
         }
         finally
         {
+            InvalidateSmsCache();
             _smsGate.Release();
         }
     }
@@ -517,7 +643,17 @@ public sealed partial class Rm500uService(
         }
         finally
         {
+            InvalidateSmsCache();
             _smsGate.Release();
+        }
+    }
+
+    private void InvalidateSmsCache()
+    {
+        lock (_smsCacheGate)
+        {
+            _cachedSms = null;
+            _smsCacheTime = default;
         }
     }
 
@@ -633,6 +769,49 @@ public sealed partial class Rm500uService(
         }
     }
 
+    private async Task<AtCommandResult> QueryOnPort(
+        string port,
+        int baudRate,
+        string command,
+        CancellationToken cancellationToken,
+        int timeoutSeconds = 6)
+    {
+        var cacheKey = $"{port}\u001f{baudRate}\u001f{command}";
+        var cacheable = LowFrequencyStatusCommands.Contains(command);
+        if (cacheable)
+        {
+            lock (_statusQueryCacheGate)
+            {
+                if (_statusQueryCache.TryGetValue(cacheKey, out var cached) &&
+                    DateTimeOffset.UtcNow - cached.CachedAt < LowFrequencyStatusCacheDuration)
+                    return cached.Result;
+
+                _statusQueryCache.Remove(cacheKey);
+            }
+        }
+
+        try
+        {
+            var result = await gateway.ExecuteOnPortAsync(
+                port,
+                baudRate,
+                command,
+                TimeSpan.FromSeconds(timeoutSeconds),
+                cancellationToken);
+            if (cacheable && result.Success)
+            {
+                lock (_statusQueryCacheGate)
+                    _statusQueryCache[cacheKey] = new CachedStatusQuery(result, DateTimeOffset.UtcNow);
+            }
+            return result;
+        }
+        catch (Exception exception)
+        {
+            log.Add("warning", "status", $"Status query failed: {command}", exception.Message);
+            return new AtCommandResult(command, false, false, exception.Message, 0);
+        }
+    }
+
     private static SignalInfo BuildSignal(string csqRaw, IReadOnlyList<CellInfo> cells)
     {
         var values = AtParser.ParseCsv(AtParser.ValueAfterColon(csqRaw, "+CSQ"));
@@ -641,12 +820,94 @@ public sealed partial class Rm500uService(
         var primary = cells.FirstOrDefault(cell => cell.Rat.StartsWith("NR", StringComparison.OrdinalIgnoreCase)) ?? cells.FirstOrDefault();
         var rssi = primary?.Rssi ?? csqRssi;
         var rsrp = primary?.Rsrp;
-        var percent = rsrp is not null
-            ? (int)Math.Round(Math.Clamp((rsrp.Value + 120) / 45 * 100, 0, 100))
-            : rssi is not null
-                ? (int)Math.Round(Math.Clamp((rssi.Value + 113) / 62 * 100, 0, 100))
-                : 0;
+        var percent = CalculateSignalPercent(rsrp, primary?.Rsrq, primary?.Sinr, rssi);
         return new SignalInfo(percent, csq, rssi, rsrp, primary?.Rsrq, primary?.Sinr);
+    }
+
+    private static SignalInfo MergeQcsqSignal(SignalInfo current, QcsqSignal fallback)
+    {
+        var rssi = fallback.Rssi ?? current.Rssi;
+        var rsrp = fallback.Rsrp ?? current.Rsrp;
+        var rsrq = fallback.Rsrq ?? current.Rsrq;
+        var sinr = fallback.Sinr ?? current.Sinr;
+        return new SignalInfo(
+            CalculateSignalPercent(rsrp, rsrq, sinr, rssi),
+            current.Csq,
+            rssi,
+            rsrp,
+            rsrq,
+            sinr);
+    }
+
+    private static QcsqSignal? ParseQcsq(string raw)
+    {
+        var line = AtParser.DataLines(raw)
+            .FirstOrDefault(value => value.StartsWith("+QCSQ:", StringComparison.OrdinalIgnoreCase));
+        if (line is null)
+            return null;
+
+        var values = AtParser.ParseCsv(line[(line.IndexOf(':') + 1)..]);
+        return values.Count < 5
+            ? null
+            : new QcsqSignal(
+                values[0],
+                AtParser.Number(values[1]),
+                AtParser.Number(values[2]),
+                AtParser.Number(values[3]),
+                AtParser.Number(values[4]));
+    }
+
+    private static bool IsCompatibleSignalRat(string qcsqRat, IReadOnlyList<CellInfo> cells)
+    {
+        var primaryRat = cells.FirstOrDefault(cell => cell.Rat.StartsWith("NR", StringComparison.OrdinalIgnoreCase))?.Rat
+                         ?? cells.FirstOrDefault()?.Rat;
+        if (string.IsNullOrWhiteSpace(primaryRat))
+            return true;
+
+        static string Family(string rat) => rat.StartsWith("NR", StringComparison.OrdinalIgnoreCase)
+            ? "NR"
+            : rat.StartsWith("LTE", StringComparison.OrdinalIgnoreCase)
+                ? "LTE"
+                : rat.ToUpperInvariant();
+
+        return Family(qcsqRat) == Family(primaryRat);
+    }
+
+    private sealed record QcsqSignal(
+        string Rat,
+        double? Rssi,
+        double? Rsrp,
+        double? Rsrq,
+        double? Sinr);
+
+    private static int CalculateSignalPercent(double? rsrp, double? rsrq, double? sinr, double? rssi)
+    {
+        var score = 0d;
+        var weight = 0d;
+        AddSignalMetric(ref score, ref weight, rsrp, -120, -70, 0.35);
+        AddSignalMetric(ref score, ref weight, rsrq, -20, -3, 0.25);
+        AddSignalMetric(ref score, ref weight, sinr, 0, 20, 0.40);
+        if (weight > 0)
+            return (int)Math.Round(score / weight);
+
+        return rssi is not null
+            ? (int)Math.Round(Math.Clamp((rssi.Value + 113) / 62 * 100, 0, 100))
+            : 0;
+    }
+
+    private static void AddSignalMetric(
+        ref double score,
+        ref double weight,
+        double? value,
+        double minimum,
+        double maximum,
+        double metricWeight)
+    {
+        if (value is null)
+            return;
+
+        score += Math.Clamp((value.Value - minimum) / (maximum - minimum) * 100, 0, 100) * metricWeight;
+        weight += metricWeight;
     }
 
     private static string ParseNatMode(string raw) => NatModeLabel(ParseNatModeValue(raw));

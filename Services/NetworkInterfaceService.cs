@@ -21,7 +21,11 @@ public sealed class NetworkInterfaceService(
     OperationLog log)
 {
     private readonly ConcurrentDictionary<string, (long Rx, long Tx, DateTimeOffset At)> _samples = new();
+    private readonly object _interfaceNameCacheGate = new();
+    private string? _autoInterfaceName;
+    private DateTimeOffset _autoInterfaceNameAt;
     private long _simulationTick;
+    private static readonly TimeSpan AutoInterfaceCacheDuration = TimeSpan.FromSeconds(30);
 
     public async Task<string> ResolveNameAsync(CancellationToken cancellationToken = default)
     {
@@ -31,25 +35,38 @@ public sealed class NetworkInterfaceService(
         if (runtime.UseSimulation)
             return "usb0";
 
+        lock (_interfaceNameCacheGate)
+        {
+            if (_autoInterfaceName is not null &&
+                DateTimeOffset.UtcNow - _autoInterfaceNameAt < AutoInterfaceCacheDuration)
+                return _autoInterfaceName;
+        }
+
         var interfaces = NetworkInterface.GetAllNetworkInterfaces()
             .Where(item => item.NetworkInterfaceType != NetworkInterfaceType.Loopback)
             .ToArray();
 
+        string resolvedName;
         if (runtime.IsWindows)
         {
-            return interfaces.FirstOrDefault(IsWindowsModemInterface)?.Name ?? string.Empty;
+            resolvedName = interfaces.FirstOrDefault(IsWindowsModemInterface)?.Name ?? string.Empty;
+        }
+        else
+        {
+            var vendorMatch = interfaces.FirstOrDefault(item => IsQuectelInterface(item.Name));
+            resolvedName = vendorMatch?.Name ?? interfaces.FirstOrDefault(item =>
+                item.Name.StartsWith("usb", StringComparison.OrdinalIgnoreCase) ||
+                item.Name.StartsWith("wwan", StringComparison.OrdinalIgnoreCase) ||
+                item.Name.StartsWith("rmnet", StringComparison.OrdinalIgnoreCase) ||
+                item.Name.StartsWith("enx", StringComparison.OrdinalIgnoreCase))?.Name ?? string.Empty;
         }
 
-        var vendorMatch = interfaces.FirstOrDefault(item => IsQuectelInterface(item.Name));
-        if (vendorMatch is not null)
-            return vendorMatch.Name;
-
-        return interfaces.FirstOrDefault(item =>
-                   item.Name.StartsWith("usb", StringComparison.OrdinalIgnoreCase) ||
-                   item.Name.StartsWith("wwan", StringComparison.OrdinalIgnoreCase) ||
-                   item.Name.StartsWith("rmnet", StringComparison.OrdinalIgnoreCase) ||
-                   item.Name.StartsWith("enx", StringComparison.OrdinalIgnoreCase))?.Name
-               ?? string.Empty;
+        lock (_interfaceNameCacheGate)
+        {
+            _autoInterfaceName = resolvedName;
+            _autoInterfaceNameAt = DateTimeOffset.UtcNow;
+        }
+        return resolvedName;
     }
 
     public async Task<InterfaceSnapshot> GetSnapshotAsync(CancellationToken cancellationToken = default)
@@ -68,7 +85,11 @@ public sealed class NetworkInterfaceService(
 
         var networkInterface = NetworkInterface.GetAllNetworkInterfaces().FirstOrDefault(item => item.Name == name);
         if (networkInterface is null)
+        {
+            lock (_interfaceNameCacheGate)
+                _autoInterfaceName = null;
             return new InterfaceSnapshot(name, "Missing", string.Empty, 0, 0, 0, 0);
+        }
 
         var statistics = networkInterface.GetIPStatistics();
         var address = networkInterface.GetIPProperties().UnicastAddresses

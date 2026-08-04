@@ -35,9 +35,12 @@ public sealed class ConfigStore
                 return _cached;
             }
 
-            await using var stream = File.OpenRead(_path);
-            var config = await JsonSerializer.DeserializeAsync<ModemConfig>(stream, _jsonOptions, cancellationToken)
+            ModemConfig config;
+            await using (var stream = File.OpenRead(_path))
+            {
+                config = await JsonSerializer.DeserializeAsync<ModemConfig>(stream, _jsonOptions, cancellationToken)
                          ?? new ModemConfig();
+            }
             var migrated = config.ApnProfiles is not { Count: > 0 };
             _cached = ModemConfigValidator.Validate(config);
             if (migrated)

@@ -33,6 +33,10 @@ public sealed class WindowsDeviceScanner(OperationLog log)
     private static readonly Regex VendorIdRegex = new(@"(?:VID|VEN)[_:-]?([0-9A-F]{4})", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     private static readonly Regex ProductIdRegex = new(@"(?:PID|DEV)[_:-]?([0-9A-F]{4})", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     private static readonly Regex InterfaceRegex = new(@"(?:MI|IF)[_:-]?([0-9A-F]{2})", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    private static readonly TimeSpan PresenceCacheDuration = TimeSpan.FromSeconds(5);
+    private readonly object _presenceCacheGate = new();
+    private IReadOnlyList<AtPortCandidate>? _presenceCache;
+    private DateTimeOffset _presenceCacheAt;
     private static readonly DevPropKey DevpkeyDeviceDesc = new(new Guid("a45c254e-df1c-4efd-8020-67d146a850e0"), 2);
     private static readonly DevPropKey DevpkeyDeviceHardwareIds = new(new Guid("a45c254e-df1c-4efd-8020-67d146a850e0"), 3);
     private static readonly DevPropKey DevpkeyDeviceManufacturer = new(new Guid("a45c254e-df1c-4efd-8020-67d146a850e0"), 13);
@@ -41,7 +45,9 @@ public sealed class WindowsDeviceScanner(OperationLog log)
     public IReadOnlyList<AtPortCandidate> Find(string? configuredPort)
     {
         var configured = NormalizePort(configuredPort);
-        return GetQuectelAtPorts()
+        var candidates = GetQuectelAtPorts();
+        UpdatePresenceCache(candidates);
+        return candidates
             .OrderBy(candidate => string.Equals(candidate.Port, configured, StringComparison.OrdinalIgnoreCase) ? 0 : 1)
             .ThenBy(candidate => PortNumber(candidate.Port))
             .ThenBy(candidate => candidate.Port, StringComparer.OrdinalIgnoreCase)
@@ -52,7 +58,30 @@ public sealed class WindowsDeviceScanner(OperationLog log)
     {
         var normalized = NormalizePort(port);
         return normalized is not null &&
-               GetQuectelAtPorts().Any(item => string.Equals(item.Port, normalized, StringComparison.OrdinalIgnoreCase));
+               GetCachedQuectelAtPorts().Any(item => string.Equals(item.Port, normalized, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private IReadOnlyList<AtPortCandidate> GetCachedQuectelAtPorts()
+    {
+        lock (_presenceCacheGate)
+        {
+            if (_presenceCache is not null && DateTimeOffset.UtcNow - _presenceCacheAt < PresenceCacheDuration)
+                return _presenceCache;
+
+            var candidates = GetQuectelAtPorts();
+            _presenceCache = candidates;
+            _presenceCacheAt = DateTimeOffset.UtcNow;
+            return candidates;
+        }
+    }
+
+    private void UpdatePresenceCache(IReadOnlyList<AtPortCandidate> candidates)
+    {
+        lock (_presenceCacheGate)
+        {
+            _presenceCache = candidates;
+            _presenceCacheAt = DateTimeOffset.UtcNow;
+        }
     }
 
     private IReadOnlyList<AtPortCandidate> GetQuectelAtPorts()

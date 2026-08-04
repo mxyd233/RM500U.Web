@@ -175,7 +175,8 @@ public sealed record SmsListResult(
     IReadOnlyList<SmsConversation> Conversations,
     string Storage,
     int Used,
-    int Total);
+    int Total,
+    bool IsRefreshing = false);
 
 public sealed record ApnControlState(
     IReadOnlyList<ApnProfile> Profiles,

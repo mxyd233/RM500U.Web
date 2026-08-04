@@ -184,8 +184,8 @@ app.MapPost("/api/cells/unlock", async (CellUnlockRequest request, Rm500uService
 app.MapPost("/api/at", async (AtCommandRequest request, Rm500uService modem, CancellationToken cancellationToken) =>
     Results.Ok(await modem.SendRawAtAsync(request.Command, request.TimeoutSeconds, cancellationToken)));
 
-app.MapGet("/api/sms", async (Rm500uService modem, CancellationToken cancellationToken) =>
-    Results.Ok(await modem.ListSmsAsync(cancellationToken)));
+app.MapGet("/api/sms", async (bool? refresh, Rm500uService modem) =>
+    Results.Ok(await modem.ListSmsSnapshotAsync(refresh == true)));
 
 app.MapPost("/api/sms", async (SmsSendRequest request, Rm500uService modem, CancellationToken cancellationToken) =>
     Results.Ok(await modem.SendSmsAsync(request, cancellationToken)));
