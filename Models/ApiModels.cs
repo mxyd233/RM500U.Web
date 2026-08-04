@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace RM500U.Web.Models;
 
 public sealed record ApiError(string Code, string Message);
@@ -147,6 +149,7 @@ public sealed record CellLockState(string Rat, bool Locked, int? Arfcn, int? Pci
 
 public sealed record NeighborCellState(IReadOnlyList<NeighborCell> Cells, IReadOnlyList<CellLockState> Locks);
 
+[JsonConverter(typeof(JsonStringEnumConverter<SmsDirection>))]
 public enum SmsDirection
 {
     Incoming,
@@ -194,3 +197,16 @@ public sealed record SmsWebhookDeliveryState(
     int PendingCount);
 
 public sealed record OperationLogEntry(DateTimeOffset Timestamp, string Level, string Source, string Message, string? Detail = null);
+
+public sealed record HealthResponse(string Status, string Service, string Version, bool Simulation, DateTimeOffset Timestamp);
+
+public sealed record SuccessResponse(bool Success);
+
+public sealed record ApnApplyResponse(
+    bool Success,
+    string Message,
+    string? Raw,
+    ActionResultModel? Apply,
+    ActionResultModel? Disconnect,
+    ActionResultModel? Connect,
+    ApnControlState State);

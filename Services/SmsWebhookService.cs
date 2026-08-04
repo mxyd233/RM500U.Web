@@ -16,7 +16,7 @@ public sealed class SmsWebhookService(
     private const int MaximumDelivered = 2000;
     private readonly SemaphoreSlim _stateGate = new(1, 1);
     private readonly HttpClient _httpClient = new();
-    private WebhookState? _state;
+    private SmsWebhookState? _state;
 
     private string StatePath => Path.Combine(runtime.DataDirectory, "sms-webhook-state.json");
 
@@ -57,21 +57,17 @@ public sealed class SmsWebhookService(
         if (!config.SmsWebhook.Enabled || string.IsNullOrWhiteSpace(config.SmsWebhook.Url))
             return new ActionResultModel(false, "Enable the SMS webhook and set its URL before testing.");
 
-        var testMessage = new
-        {
-            @event = "sms.test",
-            source = "rm500u-web",
-            sentAt = DateTimeOffset.UtcNow,
-            message = new
-            {
-                direction = "incoming",
-                peer = "+8613800138000",
-                timestamp = DateTimeOffset.UtcNow,
-                content = "RM500U webhook test",
-                indices = Array.Empty<int>(),
-                segmentCount = 1
-            }
-        };
+        var testMessage = new SmsWebhookPayload(
+            "sms.test",
+            "rm500u-web",
+            DateTimeOffset.UtcNow,
+            new SmsWebhookMessage(
+                "incoming",
+                "+8613800138000",
+                DateTimeOffset.UtcNow,
+                "RM500U webhook test",
+                [],
+                1));
         var result = await SendAsync(config.SmsWebhook, testMessage, "sms.test", cancellationToken);
         var state = await LoadStateAsync(cancellationToken);
         await SaveStateAsync(state with
@@ -160,11 +156,11 @@ public sealed class SmsWebhookService(
 
     private async Task<SendResult> SendAsync(
         SmsWebhookConfig config,
-        object payload,
+        SmsWebhookPayload payload,
         string eventName,
         CancellationToken cancellationToken)
     {
-        var body = JsonSerializer.Serialize(payload, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        var body = JsonSerializer.Serialize(payload, ApiJsonSerializerContext.Default.SmsWebhookPayload);
         var bytes = Encoding.UTF8.GetBytes(body);
         var signature = string.IsNullOrEmpty(config.Secret)
             ? null
@@ -209,7 +205,7 @@ public sealed class SmsWebhookService(
         return new SendResult(false, (lastException?.Message ?? "Webhook request failed") + suffix, lastException?.ToString());
     }
 
-    private async Task<WebhookState> LoadStateAsync(CancellationToken cancellationToken)
+    private async Task<SmsWebhookState> LoadStateAsync(CancellationToken cancellationToken)
     {
         if (_state is not null)
             return _state;
@@ -221,9 +217,9 @@ public sealed class SmsWebhookService(
             if (File.Exists(StatePath))
             {
                 await using var stream = File.OpenRead(StatePath);
-                _state = await JsonSerializer.DeserializeAsync<WebhookState>(stream, cancellationToken: cancellationToken);
+                _state = await JsonSerializer.DeserializeAsync(stream, ApiJsonSerializerContext.Default.SmsWebhookState, cancellationToken);
             }
-            _state ??= new WebhookState();
+            _state ??= new SmsWebhookState();
             _state = _state with
             {
                 Delivered = (_state.Delivered ?? []).TakeLast(MaximumDelivered).ToArray(),
@@ -234,7 +230,7 @@ public sealed class SmsWebhookService(
         catch (Exception exception) when (exception is IOException or JsonException)
         {
             log.Add("warning", "webhook", "Webhook state file could not be read; starting with an empty state.", exception.Message);
-            _state = new WebhookState();
+            _state = new SmsWebhookState();
             return _state;
         }
         finally
@@ -243,7 +239,7 @@ public sealed class SmsWebhookService(
         }
     }
 
-    private async Task SaveStateAsync(WebhookState state, CancellationToken cancellationToken)
+    private async Task SaveStateAsync(SmsWebhookState state, CancellationToken cancellationToken)
     {
         await _stateGate.WaitAsync(cancellationToken);
         try
@@ -252,7 +248,7 @@ public sealed class SmsWebhookService(
             var temporary = StatePath + ".tmp";
             await using (var stream = new FileStream(temporary, FileMode.Create, FileAccess.Write, FileShare.None))
             {
-                await JsonSerializer.SerializeAsync(stream, state, new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true }, cancellationToken);
+                await JsonSerializer.SerializeAsync(stream, state, ApiJsonSerializerContext.Default.SmsWebhookState, cancellationToken);
                 await stream.FlushAsync(cancellationToken);
             }
             File.Move(temporary, StatePath, true);
@@ -264,22 +260,18 @@ public sealed class SmsWebhookService(
         }
     }
 
-    private static object BuildPayload(SmsMessage message) => new
-    {
-        @event = "sms.received",
-        source = "rm500u-web",
-        sentAt = DateTimeOffset.UtcNow,
-        message = new
-        {
-            direction = "incoming",
-            peer = message.Peer,
-            timestamp = message.Timestamp,
-            content = message.Content,
-            indices = message.Indices,
-            segmentCount = message.SegmentCount,
-            multipart = message.IsMultipart
-        }
-    };
+    private static SmsWebhookPayload BuildPayload(SmsMessage message) => new(
+        "sms.received",
+        "rm500u-web",
+        DateTimeOffset.UtcNow,
+        new SmsWebhookMessage(
+            "incoming",
+            message.Peer,
+            message.Timestamp,
+            message.Content,
+            message.Indices,
+            message.SegmentCount,
+            message.IsMultipart));
 
     private static string Fingerprint(SmsMessage message)
     {
@@ -289,13 +281,4 @@ public sealed class SmsWebhookService(
 
     private sealed record SendResult(bool Success, string Message, string? Raw);
 
-    private sealed record WebhookState
-    {
-        public bool BaselineEstablished { get; init; }
-        public IReadOnlyList<string> Delivered { get; init; } = [];
-        public DateTimeOffset? LastAttemptAt { get; init; }
-        public bool? LastSuccess { get; init; }
-        public string? LastError { get; init; }
-        public int PendingCount { get; init; }
-    }
 }
