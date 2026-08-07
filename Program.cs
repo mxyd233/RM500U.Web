@@ -9,7 +9,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
-    options.SerializerOptions.Converters.Add(new JsonStringEnumConverter());
+    options.SerializerOptions.TypeInfoResolverChain.Insert(0, ApiJsonSerializerContext.Default);
     options.SerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull;
 });
 
@@ -48,7 +48,11 @@ app.Use(async (context, next) =>
         if (!context.Response.HasStarted)
         {
             context.Response.StatusCode = StatusCodes.Status400BadRequest;
-            await context.Response.WriteAsJsonAsync(new ApiError("invalid_request", exception.Message));
+            await context.Response.WriteAsJsonAsync(
+                new ApiError("invalid_request", exception.Message),
+                ApiJsonSerializerContext.Default.ApiError,
+                contentType: null,
+                cancellationToken: context.RequestAborted);
         }
     }
     catch (Exception exception)
@@ -57,7 +61,11 @@ app.Use(async (context, next) =>
         if (!context.Response.HasStarted)
         {
             context.Response.StatusCode = StatusCodes.Status500InternalServerError;
-            await context.Response.WriteAsJsonAsync(new ApiError("internal_error", exception.Message));
+            await context.Response.WriteAsJsonAsync(
+                new ApiError("internal_error", exception.Message),
+                ApiJsonSerializerContext.Default.ApiError,
+                contentType: null,
+                cancellationToken: context.RequestAborted);
         }
     }
 });
@@ -96,7 +104,11 @@ app.Use(async (context, next) =>
         if (!string.Equals(origin, expectedOrigin, StringComparison.OrdinalIgnoreCase))
         {
             context.Response.StatusCode = StatusCodes.Status403Forbidden;
-            await context.Response.WriteAsJsonAsync(new ApiError("origin_rejected", "Cross-origin write requests are not allowed."));
+            await context.Response.WriteAsJsonAsync(
+                new ApiError("origin_rejected", "Cross-origin write requests are not allowed."),
+                ApiJsonSerializerContext.Default.ApiError,
+                contentType: null,
+                cancellationToken: context.RequestAborted);
             return;
         }
     }
@@ -107,14 +119,12 @@ app.Use(async (context, next) =>
 app.UseDefaultFiles();
 app.UseStaticFiles();
 
-app.MapGet("/api/health", (RuntimeOptions runtime) => Results.Ok(new
-{
-    status = "ok",
-    service = "rm500u-web",
-    version = "1.0.0",
-    simulation = runtime.UseSimulation,
-    timestamp = DateTimeOffset.UtcNow
-}));
+app.MapGet("/api/health", (RuntimeOptions runtime) => Results.Ok(new HealthResponse(
+    "ok",
+    "rm500u-web",
+    "1.0.0",
+    runtime.UseSimulation,
+    DateTimeOffset.UtcNow)));
 
 app.MapGet("/api/config", async (ConfigStore store, CancellationToken cancellationToken) =>
     Results.Ok(await store.LoadAsync(cancellationToken)));
@@ -232,7 +242,14 @@ app.MapPost("/api/apn/apply", async (ApnApplyRequest request, ConfigStore store,
     await store.SaveAsync(validated, cancellationToken);
     var apply = await modem.ApplyApnAsync(validated.ActiveApnProfile, cancellationToken);
     if (!apply.Success)
-        return Results.Ok(new { apply.Success, apply.Message, apply.Raw, state = await modem.GetApnStateAsync(cancellationToken) });
+        return Results.Ok(new ApnApplyResponse(
+            apply.Success,
+            apply.Message,
+            apply.Raw,
+            apply,
+            null,
+            null,
+            await modem.GetApnStateAsync(cancellationToken)));
 
     ActionResultModel? disconnect = null;
     ActionResultModel? connect = null;
@@ -241,16 +258,14 @@ app.MapPost("/api/apn/apply", async (ApnApplyRequest request, ConfigStore store,
         disconnect = await dial.DisconnectAsync(cancellationToken);
         connect = await dial.ConnectAsync(cancellationToken);
     }
-    return Results.Ok(new
-    {
-        success = connect?.Success ?? true,
-        message = connect is null ? apply.Message : connect.Message,
-        raw = connect?.Raw ?? apply.Raw,
+    return Results.Ok(new ApnApplyResponse(
+        connect?.Success ?? true,
+        connect is null ? apply.Message : connect.Message,
+        connect?.Raw ?? apply.Raw,
         apply,
         disconnect,
         connect,
-        state = await modem.GetApnStateAsync(cancellationToken)
-    });
+        await modem.GetApnStateAsync(cancellationToken)));
 });
 
 app.MapGet("/api/sms/webhook", async (SmsWebhookService webhook, CancellationToken cancellationToken) =>
@@ -274,7 +289,7 @@ app.MapGet("/api/logs", (OperationLog log) => Results.Ok(log.Snapshot()));
 app.MapDelete("/api/logs", (OperationLog log) =>
 {
     log.Clear();
-    return Results.Ok(new { success = true });
+    return Results.Ok(new SuccessResponse(true));
 });
 
 app.MapFallbackToFile("index.html");

@@ -7,7 +7,6 @@ public sealed class ConfigStore
 {
     private readonly string _path;
     private readonly SemaphoreSlim _gate = new(1, 1);
-    private readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true };
     private ModemConfig? _cached;
 
     public ConfigStore(RuntimeOptions runtime, OperationLog log)
@@ -38,7 +37,7 @@ public sealed class ConfigStore
             ModemConfig config;
             await using (var stream = File.OpenRead(_path))
             {
-                config = await JsonSerializer.DeserializeAsync<ModemConfig>(stream, _jsonOptions, cancellationToken)
+                config = await JsonSerializer.DeserializeAsync(stream, ApiJsonSerializerContext.Default.ModemConfig, cancellationToken)
                          ?? new ModemConfig();
             }
             var migrated = config.ApnProfiles is not { Count: > 0 };
@@ -73,7 +72,7 @@ public sealed class ConfigStore
         var temporaryPath = _path + ".tmp";
         await using (var stream = new FileStream(temporaryPath, FileMode.Create, FileAccess.Write, FileShare.None))
         {
-            await JsonSerializer.SerializeAsync(stream, config, _jsonOptions, cancellationToken);
+            await JsonSerializer.SerializeAsync(stream, config, ApiJsonSerializerContext.Default.ModemConfig, cancellationToken);
             await stream.FlushAsync(cancellationToken);
         }
 

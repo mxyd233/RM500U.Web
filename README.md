@@ -18,14 +18,25 @@
 ### Linux
 
 ```bash
+# 生成 Linux ARM64 Native AOT 输出（在 Linux ARM64 或 WSL Ubuntu 中执行）
+dotnet publish RM500U.Web.csproj -c Release -p:PublishProfile=native-aot-linux-arm64
+
+# 将 deploy/install.sh 和 publish/native-aot/linux-arm64/ 复制到目标设备后安装
+# AOT 输出目录可以是任意位置，只需通过 --bin-dir 指定。
+sudo ./install.sh --bin-dir ./linux-arm64
+```
+
+也兼容常规 self-contained 发布：
+
+```bash
 # 构建
 dotnet publish RM500U.Web.csproj -c Release -r linux-arm64 --self-contained true -o publish/linux-arm64
 
 # 安装为 systemd 服务（监听 http://0.0.0.0:5080）
-sudo ./deploy/install.sh publish/linux-arm64
+sudo ./deploy/install.sh --bin-dir publish/linux-arm64
 ```
 
-首次安装会生成 Basic Auth 凭据并只显示一次。x64 设备使用 `linux-x64`。卸载执行 `sudo ./deploy/uninstall.sh`（加 `--purge` 会连同配置和凭据一起删除）。
+`install.sh` 自带 systemd unit 定义，因此独立拷贝时不需要额外复制 `rm500u-web.service`。首次安装会生成 Basic Auth 凭据并只显示一次。x64 设备使用 `linux-x64`。卸载执行 `sudo ./deploy/uninstall.sh`（加 `--purge` 会连同配置和凭据一起删除）。
 
 ### Windows
 

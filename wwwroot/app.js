@@ -519,7 +519,7 @@ function renderStatusUnavailable(error) {
 function applyPreferenceChecks(preference) {
   if (!preference) return;
   const all = String(preference).toUpperCase() === "AUTO";
-  $$('[data-page-panel="radio"] input[type="checkbox"]').forEach(input => input.checked = all || String(preference).toUpperCase().split(":").includes(input.value));
+  $$("#networkModeSelector input[type=checkbox]").forEach(input => input.checked = all || String(preference).toUpperCase().split(":").includes(input.value));
   setText("preferenceCurrent", all ? "自动选择" : String(preference).replaceAll(":", " + "));
 }
 
